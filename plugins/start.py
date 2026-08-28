@@ -1,6 +1,7 @@
 import os
 import re
 import asyncio
+from bson import ObjectId
 from pymongo import MongoClient
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -42,11 +43,17 @@ async def start_handler(bot: Client, message: Message):
             upsert=True
         )
 
+    # File Retrieval via Start Link
     if len(message.command) > 1:
         param = message.command[1]
         if param.startswith("send_"):
-            file_id = param.split("_", 1)[1]
-            file_doc = files_col.find_one({"file_id": file_id})
+            file_key = param.split("_", 1)[1]
+            file_doc = None
+            if ObjectId.is_valid(file_key):
+                file_doc = files_col.find_one({"_id": ObjectId(file_key)})
+            if not file_doc:
+                file_doc = files_col.find_one({"file_id": file_key})
+
             if file_doc:
                 sent_file = await bot.send_cached_media(
                     chat_id=message.chat.id,
@@ -81,14 +88,17 @@ async def help_handler(bot: Client, message: Message):
     )
     await message.reply_text(help_text)
 
-# Auto Indexing from Database Channel (Handles Document, Video & Caption)
-@Client.on_message(filters.channel & (filters.document | filters.video))
-async def auto_link_generator(bot: Client, message: Message):
-    media = message.document or message.video
+# Auto Indexing & Link Generator (For Channel & Private Chat)
+@Client.on_message((filters.channel | filters.private) & (filters.document | filters.video | filters.audio))
+async def media_file_handler(bot: Client, message: Message):
+    # Only Admin can upload directly via bot private chat
+    if message.from_user and ADMINS and message.from_user.id not in ADMINS:
+        return
+
+    media = message.document or message.video or message.audio
     if not media:
         return
 
-    # Extract clean file name from media attributes or caption
     file_name = getattr(media, "file_name", None)
     if not file_name and message.caption:
         file_name = message.caption.split("\n")[0]
@@ -98,6 +108,7 @@ async def auto_link_generator(bot: Client, message: Message):
     file_id = media.file_id
     file_size = getattr(media, "file_size", 0)
 
+    # Save to MongoDB
     files_col.update_one(
         {"file_id": file_id},
         {"$set": {
@@ -110,7 +121,29 @@ async def auto_link_generator(bot: Client, message: Message):
         upsert=True
     )
 
-# Search Handler (Ignores all / commands)
+    db_file = files_col.find_one({"file_id": file_id})
+    file_key = str(db_file["_id"]) if db_file else file_id
+
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username
+    share_link = f"https://t.me/{bot_username}?start=send_{file_key}"
+
+    readable_size = get_readable_size(file_size)
+    reply_text = (
+        f"✅ **ഫയൽ വിജയകരമായി സേവ് ചെയ്തു!**\n\n"
+        f"📁 **File Name:** `{file_name}`\n"
+        f"💾 **File Size:** `{readable_size}`\n\n"
+        f"🔗 **Link:**\n`{share_link}`"
+    )
+
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔗 Open Link", url=share_link)],
+        [InlineKeyboardButton("↗️ Share Link", url=f"https://t.me/share/url?url={share_link}")]
+    ])
+
+    await message.reply_text(reply_text, reply_markup=buttons, quote=True)
+
+# Search Handler
 @Client.on_message(filters.text & filters.private & ~filters.regex(r"^/"))
 async def search_handler(bot: Client, message: Message):
     if message.from_user:
@@ -131,8 +164,9 @@ async def search_handler(bot: Client, message: Message):
     buttons = []
     for file in results:
         file_size = get_readable_size(file.get("file_size", 0))
-        btn_text = f"[{file_size}] {file['file_name'][:40]}"
-        callback_data = f"get_{file['file_id']}"
+        btn_text = f"[{file_size}] {file['file_name'][:38]}"
+        file_key = str(file["_id"])
+        callback_data = f"get_{file_key}"
         buttons.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
 
     buttons.append([InlineKeyboardButton("📄 Page 1/1", callback_data="pages")])
@@ -148,8 +182,12 @@ async def search_handler(bot: Client, message: Message):
 # Callback Query Handler
 @Client.on_callback_query(filters.regex(r"^get_"))
 async def callback_handler(bot: Client, query: CallbackQuery):
-    file_id = query.data.split("_", 1)[1]
-    file_doc = files_col.find_one({"file_id": file_id})
+    file_key = query.data.split("_", 1)[1]
+    file_doc = None
+    if ObjectId.is_valid(file_key):
+        file_doc = files_col.find_one({"_id": ObjectId(file_key)})
+    if not file_doc:
+        file_doc = files_col.find_one({"file_id": file_key})
 
     if file_doc:
         sent_file = await bot.send_cached_media(
@@ -206,5 +244,5 @@ async def broadcast_handler(bot: Client, message: Message):
         f"🎉 **വിജയകരം:** `{success}`\n"
         f"🚫 **ബ്ലോക്ക് ചെയ്തവർ:** `{blocked}`\n"
         f"❌ **പരാജയപ്പെട്ടത്:** `{failed}`"
-    )
+)
     

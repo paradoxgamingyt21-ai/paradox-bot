@@ -1,11 +1,18 @@
 import asyncio
+import re
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import UserNotParticipant
-from config import CHANNEL_ID, FORCE_SUB_CHANNEL
+from pymongo import MongoClient
+from config import CHANNEL_ID, FORCE_SUB_CHANNEL, DATABASE_URL
 
-# Auto Delete Timer (120 seconds = 2 minutes)
+# Auto Delete Timer (120 seconds)
 AUTO_DELETE_TIME = 120
+
+# MongoDB Setup
+mongo_client = MongoClient(DATABASE_URL) if DATABASE_URL else None
+db = mongo_client["telegram_bot"] if mongo_client else None
+files_col = db["files"] if db is not None else None
 
 def get_readable_size(size_in_bytes):
     if not size_in_bytes:
@@ -47,7 +54,6 @@ async def is_subscribed(bot: Client, query):
 async def start_handler(bot: Client, message: Message):
     user_id = message.from_user.id
     
-    # Force Sub Check
     if not await is_subscribed(bot, message):
         invite_link = getattr(bot, "invitelink", None)
         if not invite_link:
@@ -65,7 +71,7 @@ async def start_handler(bot: Client, message: Message):
             disable_web_page_preview=True
         )
 
-    # File Retrieval via Link (/start <message_id>)
+    # Retrieval via Link
     if len(message.command) > 1:
         try:
             msg_id = int(message.command[1])
@@ -83,15 +89,13 @@ async def start_handler(bot: Client, message: Message):
         except Exception:
             return await message.reply_text("❌ ലിങ്ക് വാലിഡ് അല്ല.")
 
-    # Welcome Message
     await message.reply_text(
-        f"Hyy <b>{message.from_user.first_name}</b> 👋\n\nനിങ്ങൾക്ക് ആവശ്യമുള്ള സിനിമയുടെ പേര് അയക്കുക, ഞാൻ തപ്പിയെടുത്ത് തരാം!"
+        f"<i>Hyy</i> <b>{message.from_user.first_name}</b> 👋\n\nനിങ്ങൾക്ക് ആവശ്യമുള്ള സിനിമയുടെ പേര് അയക്കുക, ഞാൻ തപ്പിയെടുത്ത് തരാം!"
     )
 
-# Search Handler (Works in Private and Groups)
+# MongoDB Search Handler
 @Client.on_message((filters.private | filters.group) & filters.text & ~filters.command(["start"]))
 async def search_handler(bot: Client, message: Message):
-    # Force Sub Check in Private
     if message.chat.type.value == "private" and not await is_subscribed(bot, message):
         invite_link = getattr(bot, "invitelink", None)
         if not invite_link:
@@ -112,32 +116,27 @@ async def search_handler(bot: Client, message: Message):
     search_msg = await message.reply_text("🔍 <i>Searching...</i>")
     
     file_buttons = []
-    try:
-        async for msg in bot.search_messages(chat_id=CHANNEL_ID, query=query, limit=10):
-            media = msg.document or msg.video or msg.audio
-            if media:
-                file_name = getattr(media, "file_name", None) or getattr(msg, "caption", None) or "Movie File"
-                file_size = get_readable_size(media.file_size)
-                
-                # Button Text: [Size] File Name
-                btn_name = f"[{file_size}] {file_name}"
-                if len(btn_name) > 42:
-                    btn_name = btn_name[:40] + "..."
+    if files_col is not None:
+        regex_pattern = re.compile(f".*{re.escape(query)}.*", re.IGNORECASE)
+        results = files_col.find({"file_name": {"$regex": regex_pattern}}).limit(10)
+        
+        for file in results:
+            file_name = file.get("file_name", "Movie File")
+            file_size = file.get("file_size", "N/A")
+            msg_id = file.get("msg_id")
 
-                if message.chat.type.value == "private":
-                    callback_data = f"get_{msg.id}"
-                    file_buttons.append([InlineKeyboardButton(btn_name, callback_data=callback_data)])
-                else:
-                    # Deep-link for groups to redirect to Bot DM
-                    file_url = f"https://t.me/{bot.username}?start={msg.id}"
-                    file_buttons.append([InlineKeyboardButton(btn_name, url=file_url)])
-    except Exception as e:
-        bot.LOGGER(__name__).error(f"Search Error: {e}")
+            btn_name = f"[{file_size}] {file_name}"
+            if len(btn_name) > 42:
+                btn_name = btn_name[:40] + "..."
+
+            if message.chat.type.value == "private":
+                file_buttons.append([InlineKeyboardButton(btn_name, callback_data=f"get_{msg_id}")])
+            else:
+                file_buttons.append([InlineKeyboardButton(btn_name, url=f"https://t.me/{bot.username}?start={msg_id}")])
 
     if not file_buttons:
         await search_msg.edit_text("❌ <b>ക്ഷമിക്കണം, ഈ സിനിമ/ഫയൽ കണ്ടെത്താനായില്ല.</b>\n\nസ്പെല്ലിംഗ് കൃത്യമാണോ എന്ന് പരിശോധിക്കുക.")
     else:
-        # Full Layout formatting matching the UI
         buttons = [
             [InlineKeyboardButton("👇 Your Files is Ready Now 👇", callback_data="alert_ready")],
             [
@@ -149,7 +148,6 @@ async def search_handler(bot: Client, message: Message):
         buttons.extend(file_buttons)
         buttons.append([InlineKeyboardButton("📄 Page 1/1", callback_data="alert_info")])
         
-        # Invite link for request group/channel button
         invite_link = getattr(bot, "invitelink", None)
         if not invite_link and FORCE_SUB_CHANNEL:
             try:
@@ -173,7 +171,7 @@ async def search_handler(bot: Client, message: Message):
             disable_web_page_preview=True
         )
 
-# Callback for Button Click
+# Callback Handler
 @Client.on_callback_query(filters.regex(r"^(get_|alert_)"))
 async def callback_handler(bot: Client, query: CallbackQuery):
     data = query.data
@@ -202,19 +200,29 @@ async def callback_handler(bot: Client, query: CallbackQuery):
     except Exception:
         await query.answer("❌ ഫയൽ അയക്കാൻ കഴിഞ്ഞില്ല.", show_alert=True)
 
-# Stylish Clean Auto Link Generator for Database Channel
+# Auto Save to MongoDB & Generate Link
 @Client.on_message(filters.chat(CHANNEL_ID) & (filters.document | filters.video | filters.audio | filters.photo))
 async def auto_link_generator(bot: Client, message: Message):
     file_link = f"https://t.me/{bot.username}?start={message.id}"
     file_name = "Media File"
     file_size_text = ""
+    file_size_readable = "N/A"
     
     media = message.document or message.video or message.audio
     if media:
         file_name = getattr(media, "file_name", None) or getattr(message, "caption", None) or "Media File"
-        file_size_text = f"📦 <b>Size:</b> <code>{get_readable_size(media.file_size)}</code>\n"
+        file_size_readable = get_readable_size(media.file_size)
+        file_size_text = f"📦 <b>Size:</b> <code>{file_size_readable}</code>\n"
     elif message.photo:
         file_name = message.caption or "Photo"
+
+    # Save to MongoDB
+    if files_col is not None:
+        files_col.update_one(
+            {"msg_id": message.id},
+            {"$set": {"file_name": file_name, "file_size": file_size_readable, "msg_id": message.id}},
+            upsert=True
+        )
 
     text = (
         f"🎬 <b>File:</b> <code>{file_name}</code>\n"
@@ -230,5 +238,5 @@ async def auto_link_generator(bot: Client, message: Message):
         quote=True,
         reply_markup=reply_markup,
         disable_web_page_preview=True
-        )
+            )
     

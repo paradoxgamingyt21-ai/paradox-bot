@@ -21,9 +21,14 @@ CHANNEL_ID = int(raw_channel) if raw_channel else 0
 raw_fsub = os.environ.get("FORCE_SUB_CHANNEL", "0")
 FORCE_SUB_CHANNEL = int(raw_fsub) if raw_fsub and raw_fsub != "0" else None
 
+# Admin Configuration
+raw_admins = os.environ.get("ADMINS", "")
+ADMINS = [int(i.strip()) for i in raw_admins.split() if i.strip().isdigit()]
+
 # Database Configuration
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 # Server & Bot Settings
 TG_BOT_WORKERS = int(os.environ.get("TG_BOT_WORKERS", "4"))
 PORT = int(os.environ.get("PORT", "8080"))
+

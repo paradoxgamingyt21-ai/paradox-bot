@@ -4,6 +4,20 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 from pyrogram.errors import UserNotParticipant
 from config import CHANNEL_ID, FORCE_SUB_CHANNEL
 
+# Auto Delete Timer (120 seconds = 2 minutes)
+AUTO_DELETE_TIME = 120
+
+async def auto_delete_file(file_msg: Message, alert_msg: Message, delay: int = AUTO_DELETE_TIME):
+    await asyncio.sleep(delay)
+    try:
+        await file_msg.delete()
+    except Exception:
+        pass
+    try:
+        await alert_msg.delete()
+    except Exception:
+        pass
+
 async def is_subscribed(bot: Client, query):
     if not FORCE_SUB_CHANNEL:
         return True
@@ -46,7 +60,13 @@ async def start_handler(bot: Client, message: Message):
             msg = await bot.get_messages(chat_id=CHANNEL_ID, message_ids=msg_id)
             if msg.empty:
                 return await message.reply_text("❌ ഫയൽ ലഭ്യമല്ല അല്ലെങ്കിൽ ഡിലീറ്റ് ചെയ്യപ്പെട്ടു.")
-            await msg.copy(chat_id=user_id)
+            
+            copied_msg = await msg.copy(chat_id=user_id)
+            alert_msg = await bot.send_message(
+                chat_id=user_id,
+                text="⏳ <b>ശ്രദ്ധിക്കുക:</b> ഈ ഫയൽ <b>2 മിനിറ്റിനുള്ളിൽ</b> തനിയെ ഡിലീറ്റ് ആകും. സൂക്ഷിക്കാൻ വേറെ ചാറ്റിലേക്ക് Forward ചെയ്തു വെക്കുക."
+            )
+            asyncio.create_task(auto_delete_file(copied_msg, alert_msg, AUTO_DELETE_TIME))
             return
         except Exception:
             return await message.reply_text("❌ ലിങ്ക് വാലിഡ് അല്ല.")
@@ -91,7 +111,6 @@ async def search_handler(bot: Client, message: Message):
                 elif msg.photo:
                     file_name = msg.caption or "Photo"
                 
-                # Button name length limit
                 display_name = (file_name[:28] + '..') if len(file_name) > 30 else file_name
                 buttons.append([InlineKeyboardButton(f"🎬 {display_name}", callback_data=f"get_{msg.id}")])
     except Exception as e:
@@ -117,7 +136,12 @@ async def send_file_callback(bot: Client, query: CallbackQuery):
         if msg.empty:
             return await query.answer("❌ ഫയൽ ലഭ്യമല്ല.", show_alert=True)
         
-        await msg.copy(chat_id=query.from_user.id)
+        copied_msg = await msg.copy(chat_id=query.from_user.id)
+        alert_msg = await bot.send_message(
+            chat_id=query.from_user.id,
+            text="⏳ <b>ശ്രദ്ധിക്കുക:</b> ഈ ഫയൽ <b>2 മിനിറ്റിനുള്ളിൽ</b> തനിയെ ഡിലീറ്റ് ആകും. സൂക്ഷിക്കാൻ വേറെ ചാറ്റിലേക്ക് Forward ചെയ്തു വെക്കുക."
+        )
+        asyncio.create_task(auto_delete_file(copied_msg, alert_msg, AUTO_DELETE_TIME))
         await query.answer("ഫയൽ അയച്ചിട്ടുണ്ട്! ✅")
     except Exception:
         await query.answer("❌ ഫയൽ അയക്കാൻ കഴിഞ്ഞില്ല.", show_alert=True)
@@ -127,4 +151,4 @@ async def send_file_callback(bot: Client, query: CallbackQuery):
 async def auto_link_generator(bot: Client, message: Message):
     file_link = f"https://t.me/{bot.username}?start={message.id}"
     await message.reply_text(f"<b>🔗 ഡൗൺലോഡ് ലിങ്ക്:</b>\n\n{file_link}", quote=True)
-                                                    
+    

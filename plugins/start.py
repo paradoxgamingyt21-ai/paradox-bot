@@ -1,241 +1,193 @@
-import asyncio
+import os
 import re
+import asyncio
+from pymongo import MongoClient
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import UserNotParticipant
-from pymongo import MongoClient
-from config import CHANNEL_ID, FORCE_SUB_CHANNEL, DATABASE_URL
+from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
+from config import DATABASE_URL, FORCE_SUB_CHANNEL, ADMINS
 
-# Auto Delete Timer (120 seconds)
-AUTO_DELETE_TIME = 120
-
-# MongoDB Setup
-mongo_client = MongoClient(DATABASE_URL) if DATABASE_URL else None
-db = mongo_client["telegram_bot"] if mongo_client else None
-files_col = db["files"] if db is not None else None
+# MongoDB Database Setup
+mongo_client = MongoClient(DATABASE_URL)
+db = mongo_client["movie_bot_db"]
+files_col = db["files"]
+users_col = db["users"]
 
 def get_readable_size(size_in_bytes):
     if not size_in_bytes:
-        return "N/A"
+        return "0 B"
     units = ["B", "KB", "MB", "GB", "TB"]
-    i = 0
     size = float(size_in_bytes)
-    while size >= 1024.0 and i < len(units) - 1:
+    unit_index = 0
+    while size >= 1024.0 and unit_index < len(units) - 1:
         size /= 1024.0
-        i += 1
-    return f"{size:.2f} {units[i]}"
+        unit_index += 1
+    return f"{size:.2f} {units[unit_index]}"
 
-async def auto_delete_file(file_msg: Message, alert_msg: Message, delay: int = AUTO_DELETE_TIME):
+async def auto_delete_message(bot: Client, chat_id: int, message_ids: list, delay: int = 120):
     await asyncio.sleep(delay)
-    try:
-        await file_msg.delete()
-    except Exception:
-        pass
-    try:
-        await alert_msg.delete()
-    except Exception:
-        pass
+    for msg_id in message_ids:
+        try:
+            await bot.delete_messages(chat_id=chat_id, message_ids=msg_id)
+        except Exception:
+            pass
 
-async def is_subscribed(bot: Client, query):
-    if not FORCE_SUB_CHANNEL:
-        return True
-    try:
-        user = await bot.get_chat_member(FORCE_SUB_CHANNEL, query.from_user.id)
-        if user.status in ["kicked", "left"]:
-            return False
-        return True
-    except UserNotParticipant:
-        return False
-    except Exception:
-        return True
-
-# Start Command Handler
+# Start Command
 @Client.on_message(filters.command("start") & filters.private)
 async def start_handler(bot: Client, message: Message):
-    user_id = message.from_user.id
-    
-    if not await is_subscribed(bot, message):
-        invite_link = getattr(bot, "invitelink", None)
-        if not invite_link:
-            chat = await bot.get_chat(FORCE_SUB_CHANNEL)
-            invite_link = chat.invite_link or await bot.export_chat_invite_link(FORCE_SUB_CHANNEL)
-        
-        param = message.command[1] if len(message.command) > 1 else ""
-        buttons = [
-            [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
-            [InlineKeyboardButton("🔄 Try Again", url=f"https://t.me/{bot.username}?start={param}")]
-        ]
-        return await message.reply_text(
-            "<b>നിങ്ങൾക്ക് ഫയൽ ലഭിക്കാൻ താഴെ കാണുന്ന ചാനലിൽ ജോയിൻ ചെയ്യുക. ശേഷം 'Try Again' ക്ലിക്ക് ചെയ്യുക!</b>",
-            reply_markup=InlineKeyboardMarkup(buttons),
-            disable_web_page_preview=True
-        )
-
-    # Retrieval via Link
-    if len(message.command) > 1:
-        try:
-            msg_id = int(message.command[1])
-            msg = await bot.get_messages(chat_id=CHANNEL_ID, message_ids=msg_id)
-            if msg.empty:
-                return await message.reply_text("❌ ഫയൽ ലഭ്യമല്ല അല്ലെങ്കിൽ ഡിലീറ്റ് ചെയ്യപ്പെട്ടു.")
-            
-            copied_msg = await msg.copy(chat_id=user_id)
-            alert_msg = await bot.send_message(
-                chat_id=user_id,
-                text="⏳ <b>ശ്രദ്ധിക്കുക:</b> ഈ ഫയൽ <b>2 മിനിറ്റിനുള്ളിൽ</b> തനിയെ ഡിലീറ്റ് ആകും. സേവ് ചെയ്യാൻ മറ്റൊരു ചാറ്റിലേക്ക് Forward ചെയ്യുക."
-            )
-            asyncio.create_task(auto_delete_file(copied_msg, alert_msg, AUTO_DELETE_TIME))
-            return
-        except Exception:
-            return await message.reply_text("❌ ലിങ്ക് വാലിഡ് അല്ല.")
-
-    await message.reply_text(
-        f"<i>Hyy</i> <b>{message.from_user.first_name}</b> 👋\n\nനിങ്ങൾക്ക് ആവശ്യമുള്ള സിനിമയുടെ പേര് അയക്കുക, ഞാൻ തപ്പിയെടുത്ത് തരാം!"
-    )
-
-# MongoDB Search Handler
-@Client.on_message((filters.private | filters.group) & filters.text & ~filters.command(["start"]))
-async def search_handler(bot: Client, message: Message):
-    if message.chat.type.value == "private" and not await is_subscribed(bot, message):
-        invite_link = getattr(bot, "invitelink", None)
-        if not invite_link:
-            chat = await bot.get_chat(FORCE_SUB_CHANNEL)
-            invite_link = chat.invite_link or await bot.export_chat_invite_link(FORCE_SUB_CHANNEL)
-        
-        buttons = [[InlineKeyboardButton("📢 Join Channel", url=invite_link)]]
-        return await message.reply_text(
-            "<b>ഫയലുകൾ തിരയാൻ ആദ്യം ഞങ്ങളുടെ ചാനലിൽ ജോയിൻ ചെയ്യുക!</b>",
-            reply_markup=InlineKeyboardMarkup(buttons),
-            disable_web_page_preview=True
-        )
-
-    query = message.text.strip()
-    if len(query) < 2:
-        return
-
-    search_msg = await message.reply_text("🔍 <i>Searching...</i>")
-    
-    file_buttons = []
-    if files_col is not None:
-        regex_pattern = re.compile(f".*{re.escape(query)}.*", re.IGNORECASE)
-        results = files_col.find({"file_name": {"$regex": regex_pattern}}).limit(10)
-        
-        for file in results:
-            file_name = file.get("file_name", "Movie File")
-            file_size = file.get("file_size", "N/A")
-            msg_id = file.get("msg_id")
-
-            btn_name = f"[{file_size}] {file_name}"
-            if len(btn_name) > 42:
-                btn_name = btn_name[:40] + "..."
-
-            if message.chat.type.value == "private":
-                file_buttons.append([InlineKeyboardButton(btn_name, callback_data=f"get_{msg_id}")])
-            else:
-                file_buttons.append([InlineKeyboardButton(btn_name, url=f"https://t.me/{bot.username}?start={msg_id}")])
-
-    if not file_buttons:
-        await search_msg.edit_text("❌ <b>ക്ഷമിക്കണം, ഈ സിനിമ/ഫയൽ കണ്ടെത്താനായില്ല.</b>\n\nസ്പെല്ലിംഗ് കൃത്യമാണോ എന്ന് പരിശോധിക്കുക.")
-    else:
-        buttons = [
-            [InlineKeyboardButton("👇 Your Files is Ready Now 👇", callback_data="alert_ready")],
-            [
-                InlineKeyboardButton("⚙️ Best", callback_data="alert_info"),
-                InlineKeyboardButton("🎁 Tips", callback_data="alert_info"),
-                InlineKeyboardButton("Info 📨", callback_data="alert_info")
-            ]
-        ]
-        buttons.extend(file_buttons)
-        buttons.append([InlineKeyboardButton("📄 Page 1/1", callback_data="alert_info")])
-        
-        invite_link = getattr(bot, "invitelink", None)
-        if not invite_link and FORCE_SUB_CHANNEL:
-            try:
-                chat = await bot.get_chat(FORCE_SUB_CHANNEL)
-                invite_link = chat.invite_link or await bot.export_chat_invite_link(FORCE_SUB_CHANNEL)
-            except Exception:
-                invite_link = None
-
-        if invite_link:
-            buttons.append([InlineKeyboardButton("🎬 REQUEST GROUP 🎬", url=invite_link)])
-
-        caption_text = (
-            f"<i>Hyy</i> <b>{message.from_user.first_name}</b> 👋\n\n"
-            f"🎴 <b>Title :</b> <code>{query}</code>\n\n"
-            f"🔰 <b>Thx For Request 🎯</b>"
-        )
-
-        await search_msg.edit_text(
-            text=caption_text,
-            reply_markup=InlineKeyboardMarkup(buttons),
-            disable_web_page_preview=True
-        )
-
-# Callback Handler
-@Client.on_callback_query(filters.regex(r"^(get_|alert_)"))
-async def callback_handler(bot: Client, query: CallbackQuery):
-    data = query.data
-    
-    if data == "alert_ready":
-        return await query.answer("നിങ്ങൾക്ക് ആവശ്യമുള്ള ഫയലിന്റെ ബട്ടണിൽ ക്ലിക്ക് ചെയ്യുക! 👇", show_alert=True)
-    elif data == "alert_info":
-        return await query.answer("Paradox Movie Bot v2.0", show_alert=False)
-
-    if not await is_subscribed(bot, query):
-        return await query.answer("ആദ്യം ചാനലിൽ ജോയിൻ ചെയ്യുക! ❌", show_alert=True)
-    
-    msg_id = int(data.split("_")[1])
-    try:
-        msg = await bot.get_messages(chat_id=CHANNEL_ID, message_ids=msg_id)
-        if msg.empty:
-            return await query.answer("❌ ഫയൽ ലഭ്യമല്ല.", show_alert=True)
-        
-        copied_msg = await msg.copy(chat_id=query.from_user.id)
-        alert_msg = await bot.send_message(
-            chat_id=query.from_user.id,
-            text="⏳ <b>ശ്രദ്ധിക്കുക:</b> ഈ ഫയൽ <b>2 മിനിറ്റിനുള്ളിൽ</b> തനിയെ ഡിലീറ്റ് ആകും. സേവ് ചെയ്യാൻ മറ്റൊരു ചാറ്റിലേക്ക് Forward ചെയ്യുക."
-        )
-        asyncio.create_task(auto_delete_file(copied_msg, alert_msg, AUTO_DELETE_TIME))
-        await query.answer("ഫയൽ അയച്ചിട്ടുണ്ട്! ✅")
-    except Exception:
-        await query.answer("❌ ഫയൽ അയക്കാൻ കഴിഞ്ഞില്ല.", show_alert=True)
-
-# Auto Save to MongoDB & Generate Link
-@Client.on_message(filters.chat(CHANNEL_ID) & (filters.document | filters.video | filters.audio | filters.photo))
-async def auto_link_generator(bot: Client, message: Message):
-    file_link = f"https://t.me/{bot.username}?start={message.id}"
-    file_name = "Media File"
-    file_size_text = ""
-    file_size_readable = "N/A"
-    
-    media = message.document or message.video or message.audio
-    if media:
-        file_name = getattr(media, "file_name", None) or getattr(message, "caption", None) or "Media File"
-        file_size_readable = get_readable_size(media.file_size)
-        file_size_text = f"📦 <b>Size:</b> <code>{file_size_readable}</code>\n"
-    elif message.photo:
-        file_name = message.caption or "Photo"
-
-    # Save to MongoDB
-    if files_col is not None:
-        files_col.update_one(
-            {"msg_id": message.id},
-            {"$set": {"file_name": file_name, "file_size": file_size_readable, "msg_id": message.id}},
+    if message.from_user:
+        users_col.update_one(
+            {"_id": message.from_user.id},
+            {"$set": {"name": message.from_user.first_name}},
             upsert=True
         )
 
+    if len(message.command) > 1:
+        param = message.command[1]
+        if param.startswith("send_"):
+            file_id = param.split("_", 1)[1]
+            file_doc = files_col.find_one({"file_id": file_id})
+            if file_doc:
+                sent_file = await bot.send_cached_media(
+                    chat_id=message.chat.id,
+                    file_id=file_doc["file_id"],
+                    caption=f"📁 **File Name:** {file_doc['file_name']}"
+                )
+                warn_msg = await bot.send_message(
+                    chat_id=message.chat.id,
+                    text="⏳ **Note:** ഈ ഫയൽ 2 മിനിറ്റിനുള്ളിൽ ഓട്ടോമാറ്റിക് ആയി ഡിലീറ്റ് ആകും. അതിനാൽ സേവ്ഡ് മെസ്സേജിലേക്ക് ഫോർവേഡ് ചെയ്യുക."
+                )
+                asyncio.create_task(auto_delete_message(bot, message.chat.id, [sent_file.id, warn_msg.id], 120))
+                return
+            else:
+                await message.reply_text("❌ ക്ഷമിക്കണം, ഈ ഫയൽ ഡാറ്റാബേസിൽ കണ്ടെത്താനായില്ല.")
+                return
+
+    user_mention = message.from_user.mention if message.from_user else "Friend"
     text = (
-        f"🎬 <b>File:</b> <code>{file_name}</code>\n"
-        f"{file_size_text}"
+        f"𝘏𝘺𝘺  **{user_mention}**  👋\n\n"
+        f"നിങ്ങൾക്ക് ആവശ്യമുള്ള സിനിമയുടെ പേര് അയക്കുക, ഞാൻ തപ്പിയെടുത്തു തരാം!"
     )
+    await message.reply_text(text)
+
+# Auto Indexing from Database Channel
+@Client.on_message(filters.channel & (filters.document | filters.video))
+async def auto_link_generator(bot: Client, message: Message):
+    media = message.document or message.video
+    if not media:
+        return
+
+    file_id = media.file_id
+    file_name = media.file_name or "Unknown File"
+    file_size = media.file_size
+
+    files_col.update_one(
+        {"file_id": file_id},
+        {"$set": {
+            "file_id": file_id,
+            "file_name": file_name,
+            "file_size": file_size,
+            "message_id": message.id,
+            "chat_id": message.chat.id
+        }},
+        upsert=True
+    )
+
+# Search Handler
+@Client.on_message(filters.text & filters.private & ~filters.command(["start", "broadcast"]))
+async def search_handler(bot: Client, message: Message):
+    if message.from_user:
+        users_col.update_one(
+            {"_id": message.from_user.id},
+            {"$set": {"name": message.from_user.first_name}},
+            upsert=True
+        )
+
+    query = message.text.strip()
+    regex = re.compile(query, re.IGNORECASE)
+    results = list(files_col.find({"file_name": regex}).limit(10))
+
+    if not results:
+        await message.reply_text("❌ ക്ഷമിക്കണം, നിങ്ങൾ തിരഞ്ഞ ഫയൽ കണ്ടെത്താനായില്ല.")
+        return
+
+    buttons = []
+    for file in results:
+        file_size = get_readable_size(file.get("file_size", 0))
+        btn_text = f"[{file_size}] {file['file_name']}"
+        callback_data = f"get_{file['file_id']}"
+        buttons.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
+
+    buttons.append([InlineKeyboardButton("📄 Page 1/1", callback_data="pages")])
+
+    user_mention = message.from_user.mention if message.from_user else "Friend"
+    header_text = (
+        f"𝘏𝘺𝘺  **{user_mention}**  👋\n\n"
+        f"🎴 **Title :** {query}\n\n"
+        f"🔰 **Thx For Request** 🎯"
+    )
+    await message.reply_text(header_text, reply_markup=InlineKeyboardMarkup(buttons))
+
+# Callback Query Handler
+@Client.on_callback_query(filters.regex(r"^get_"))
+async def callback_handler(bot: Client, query: CallbackQuery):
+    file_id = query.data.split("_", 1)[1]
+    file_doc = files_col.find_one({"file_id": file_id})
+
+    if file_doc:
+        sent_file = await bot.send_cached_media(
+            chat_id=query.message.chat.id,
+            file_id=file_doc["file_id"],
+            caption=f"📁 **File Name:** {file_doc['file_name']}"
+        )
+        await query.answer("ഫയൽ അയച്ചിട്ടുണ്ട്!")
+        warn_msg = await bot.send_message(
+            chat_id=query.message.chat.id,
+            text="⏳ **Note:** ഈ ഫയൽ 2 മിനിറ്റിനുള്ളിൽ ഓട്ടോമാറ്റിക് ആയി ഡിലീറ്റ് ആകും. അതിനാൽ സേവ്ഡ് മെസ്സേജിലേക്ക് ഫോർവേഡ് ചെയ്യുക."
+        )
+        asyncio.create_task(auto_delete_message(bot, query.message.chat.id, [sent_file.id, warn_msg.id], 120))
+    else:
+        await query.answer("❌ ഫയൽ ലഭ്യമല്ല!", show_alert=True)
+
+# Broadcast Command
+@Client.on_message(filters.command("broadcast") & filters.private)
+async def broadcast_handler(bot: Client, message: Message):
+    if message.from_user.id not in ADMINS:
+        return
+
+    if not message.reply_to_message:
+        await message.reply_text("⚠️ പ്രക്ഷേപണം ചെയ്യാൻ ആഗ്രഹിക്കുന്ന മെസ്സേജിന് **Reply** ആയി `/broadcast` എന്ന് അയക്കുക.")
+        return
+
+    status_msg = await message.reply_text("🔄 **ബ്രോഡ്കാസ്റ്റ് ആരംഭിക്കുന്നു...**")
+    users = list(users_col.find())
+    total_users = len(users)
+    success = 0
+    blocked = 0
+    failed = 0
+
+    for user in users:
+        user_id = user["_id"]
+        try:
+            await message.reply_to_message.copy(chat_id=user_id)
+            success += 1
+            await asyncio.sleep(0.05)
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await message.reply_to_message.copy(chat_id=user_id)
+            success += 1
+        except UserIsBlocked:
+            blocked += 1
+        except InputUserDeactivated:
+            failed += 1
+        except Exception:
+            failed += 1
+
+    await status_msg.edit_text(
+        f"✅ **ബ്രോഡ്കാസ്റ്റ് പൂർത്തിയായി!**\n\n"
+        f"👥 **ആകെ യൂസർമാർ:** `{total_users}`\n"
+        f"🎉 **വിജയകരം:** `{success}`\n"
+        f"🚫 **ബ്ലോക്ക് ചെയ്തവർ:** `{blocked}`\n"
+        f"❌ **പരാജയപ്പെട്ടത്:** `{failed}`"
+        )
     
-    reply_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 Download File 📥", url=file_link)]
-    ])
-    
-    await message.reply_text(
-        text=text,
-        quote=True,
-        reply_markup=reply_markup,
-        disable_web_page_preview=True
-                                     )

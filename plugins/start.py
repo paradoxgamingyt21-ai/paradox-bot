@@ -238,5 +238,4 @@ async def auto_link_generator(bot: Client, message: Message):
         quote=True,
         reply_markup=reply_markup,
         disable_web_page_preview=True
-            )
-    
+                                     )

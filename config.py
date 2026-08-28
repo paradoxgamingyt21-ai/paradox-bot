@@ -7,7 +7,7 @@ logging.basicConfig(
     format="[%(asctime)s - %(levelname)s] - %(name)s - %(message)s",
     datefmt="%d-%b-%y %H:%M:%S"
 )
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger
 
 # Bot Configuration
 API_ID = int(os.environ.get("API_ID", "0"))

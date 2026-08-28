@@ -9,7 +9,7 @@ AUTO_DELETE_TIME = 120
 
 def get_readable_size(size_in_bytes):
     if not size_in_bytes:
-        return "0 B"
+        return "N/A"
     units = ["B", "KB", "MB", "GB", "TB"]
     i = 0
     size = float(size_in_bytes)
@@ -76,7 +76,7 @@ async def start_handler(bot: Client, message: Message):
             copied_msg = await msg.copy(chat_id=user_id)
             alert_msg = await bot.send_message(
                 chat_id=user_id,
-                text="⏳ <b>ശ്രദ്ധിക്കുക:</b> ഈ ഫയൽ <b>2 മിനിറ്റിനുള്ളിൽ</b> തനിയെ ഡിലീറ്റ് ആകും. സൂക്ഷിക്കാൻ വേറെ ചാറ്റിലേക്ക് Forward ചെയ്തു വെക്കുക."
+                text="⏳ <b>ശ്രദ്ധിക്കുക:</b> ഈ ഫയൽ <b>2 മിനിറ്റിനുള്ളിൽ</b> തനിയെ ഡിലീറ്റ് ആകും. സേവ് ചെയ്യാൻ മറ്റൊരു ചാറ്റിലേക്ക് Forward ചെയ്യുക."
             )
             asyncio.create_task(auto_delete_file(copied_msg, alert_msg, AUTO_DELETE_TIME))
             return
@@ -85,65 +85,108 @@ async def start_handler(bot: Client, message: Message):
 
     # Welcome Message
     await message.reply_text(
-        f"ഹലോ <b>{message.from_user.first_name}</b> 👋\n\nനിങ്ങൾക്ക് ആവശ്യമുള്ള സിനിമയുടെ പേര് ഇവിടെ മെസ്സേജ് ആയി അയക്കുക. ഞാൻ ചാനലിൽ നിന്ന് തപ്പിയെടുത്ത് തരാം!"
+        f"Hyy <b>{message.from_user.first_name}</b> 👋\n\nനിങ്ങൾക്ക് ആവശ്യമുള്ള സിനിമയുടെ പേര് അയക്കുക, ഞാൻ തപ്പിയെടുത്ത് തരാം!"
     )
 
-# Movie Name Search Handler
-@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
+# Search Handler (Works in Private and Groups)
+@Client.on_message((filters.private | filters.group) & filters.text & ~filters.command(["start"]))
 async def search_handler(bot: Client, message: Message):
-    # Force Sub Check
-    if not await is_subscribed(bot, message):
+    # Force Sub Check in Private
+    if message.chat.type.value == "private" and not await is_subscribed(bot, message):
         invite_link = getattr(bot, "invitelink", None)
         if not invite_link:
             chat = await bot.get_chat(FORCE_SUB_CHANNEL)
             invite_link = chat.invite_link or await bot.export_chat_invite_link(FORCE_SUB_CHANNEL)
         
-        buttons = [
-            [InlineKeyboardButton("📢 Join Channel", url=invite_link)]
-        ]
+        buttons = [[InlineKeyboardButton("📢 Join Channel", url=invite_link)]]
         return await message.reply_text(
             "<b>ഫയലുകൾ തിരയാൻ ആദ്യം ഞങ്ങളുടെ ചാനലിൽ ജോയിൻ ചെയ്യുക!</b>",
             reply_markup=InlineKeyboardMarkup(buttons),
             disable_web_page_preview=True
         )
 
-    query = message.text
-    search_msg = await message.reply_text("🔍 <i>തിരയുന്നു... ദയവായി കാത്തിരിക്കുക...</i>")
+    query = message.text.strip()
+    if len(query) < 2:
+        return
+
+    search_msg = await message.reply_text("🔍 <i>Searching...</i>")
     
-    buttons = []
+    file_buttons = []
     try:
         async for msg in bot.search_messages(chat_id=CHANNEL_ID, query=query, limit=10):
-            if msg.document or msg.video or msg.audio or msg.photo:
-                file_name = ""
-                if msg.document:
-                    file_name = msg.document.file_name or "Document"
-                elif msg.video:
-                    file_name = msg.video.file_name or msg.caption or "Video"
-                elif msg.audio:
-                    file_name = msg.audio.file_name or msg.caption or "Audio"
-                elif msg.photo:
-                    file_name = msg.caption or "Photo"
+            media = msg.document or msg.video or msg.audio
+            if media:
+                file_name = getattr(media, "file_name", None) or getattr(msg, "caption", None) or "Movie File"
+                file_size = get_readable_size(media.file_size)
                 
-                display_name = (file_name[:28] + '..') if len(file_name) > 30 else file_name
-                buttons.append([InlineKeyboardButton(f"🎬 {display_name}", callback_data=f"get_{msg.id}")])
+                # Button Text: [Size] File Name
+                btn_name = f"[{file_size}] {file_name}"
+                if len(btn_name) > 42:
+                    btn_name = btn_name[:40] + "..."
+
+                if message.chat.type.value == "private":
+                    callback_data = f"get_{msg.id}"
+                    file_buttons.append([InlineKeyboardButton(btn_name, callback_data=callback_data)])
+                else:
+                    # Deep-link for groups to redirect to Bot DM
+                    file_url = f"https://t.me/{bot.username}?start={msg.id}"
+                    file_buttons.append([InlineKeyboardButton(btn_name, url=file_url)])
     except Exception as e:
         bot.LOGGER(__name__).error(f"Search Error: {e}")
 
-    if not buttons:
+    if not file_buttons:
         await search_msg.edit_text("❌ <b>ക്ഷമിക്കണം, ഈ സിനിമ/ഫയൽ കണ്ടെത്താനായില്ല.</b>\n\nസ്പെല്ലിംഗ് കൃത്യമാണോ എന്ന് പരിശോധിക്കുക.")
     else:
+        # Full Layout formatting matching the UI
+        buttons = [
+            [InlineKeyboardButton("👇 Your Files is Ready Now 👇", callback_data="alert_ready")],
+            [
+                InlineKeyboardButton("⚙️ Best", callback_data="alert_info"),
+                InlineKeyboardButton("🎁 Tips", callback_data="alert_info"),
+                InlineKeyboardButton("Info 📨", callback_data="alert_info")
+            ]
+        ]
+        buttons.extend(file_buttons)
+        buttons.append([InlineKeyboardButton("📄 Page 1/1", callback_data="alert_info")])
+        
+        # Invite link for request group/channel button
+        invite_link = getattr(bot, "invitelink", None)
+        if not invite_link and FORCE_SUB_CHANNEL:
+            try:
+                chat = await bot.get_chat(FORCE_SUB_CHANNEL)
+                invite_link = chat.invite_link or await bot.export_chat_invite_link(FORCE_SUB_CHANNEL)
+            except Exception:
+                invite_link = None
+
+        if invite_link:
+            buttons.append([InlineKeyboardButton("🎬 REQUEST GROUP 🎬", url=invite_link)])
+
+        caption_text = (
+            f"<i>Hyy</i> <b>{message.from_user.first_name}</b> 👋\n\n"
+            f"🎴 <b>Title :</b> <code>{query}</code>\n\n"
+            f"🔰 <b>Thx For Request 🎯</b>"
+        )
+
         await search_msg.edit_text(
-            f"🎬 <b>'{query}'</b> എന്നതിനായി കണ്ടെത്തിയ ഫയലുകൾ താഴെ നൽകുന്നു:\n\nഡൗൺലോഡ് ചെയ്യാൻ താഴെയുള്ള ബട്ടണിൽ ക്ലിക്ക് ചെയ്യുക 👇",
-            reply_markup=InlineKeyboardMarkup(buttons)
+            text=caption_text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            disable_web_page_preview=True
         )
 
 # Callback for Button Click
-@Client.on_callback_query(filters.regex(r"^get_"))
-async def send_file_callback(bot: Client, query: CallbackQuery):
+@Client.on_callback_query(filters.regex(r"^(get_|alert_)"))
+async def callback_handler(bot: Client, query: CallbackQuery):
+    data = query.data
+    
+    if data == "alert_ready":
+        return await query.answer("നിങ്ങൾക്ക് ആവശ്യമുള്ള ഫയലിന്റെ ബട്ടണിൽ ക്ലിക്ക് ചെയ്യുക! 👇", show_alert=True)
+    elif data == "alert_info":
+        return await query.answer("Paradox Movie Bot v2.0", show_alert=False)
+
     if not await is_subscribed(bot, query):
         return await query.answer("ആദ്യം ചാനലിൽ ജോയിൻ ചെയ്യുക! ❌", show_alert=True)
     
-    msg_id = int(query.data.split("_")[1])
+    msg_id = int(data.split("_")[1])
     try:
         msg = await bot.get_messages(chat_id=CHANNEL_ID, message_ids=msg_id)
         if msg.empty:
@@ -152,18 +195,17 @@ async def send_file_callback(bot: Client, query: CallbackQuery):
         copied_msg = await msg.copy(chat_id=query.from_user.id)
         alert_msg = await bot.send_message(
             chat_id=query.from_user.id,
-            text="⏳ <b>ശ്രദ്ധിക്കുക:</b> ഈ ഫയൽ <b>2 മിനിറ്റിനുള്ളിൽ</b> തനിയെ ഡിലീറ്റ് ആകും. സൂക്ഷിക്കാൻ വേറെ ചാറ്റിലേക്ക് Forward ചെയ്തു വെക്കുക."
+            text="⏳ <b>ശ്രദ്ധിക്കുക:</b> ഈ ഫയൽ <b>2 മിനിറ്റിനുള്ളിൽ</b> തനിയെ ഡിലീറ്റ് ആകും. സേവ് ചെയ്യാൻ മറ്റൊരു ചാറ്റിലേക്ക് Forward ചെയ്യുക."
         )
         asyncio.create_task(auto_delete_file(copied_msg, alert_msg, AUTO_DELETE_TIME))
         await query.answer("ഫയൽ അയച്ചിട്ടുണ്ട്! ✅")
     except Exception:
         await query.answer("❌ ഫയൽ അയക്കാൻ കഴിഞ്ഞില്ല.", show_alert=True)
 
-# Stylish Clean Auto Link Generator
+# Stylish Clean Auto Link Generator for Database Channel
 @Client.on_message(filters.chat(CHANNEL_ID) & (filters.document | filters.video | filters.audio | filters.photo))
 async def auto_link_generator(bot: Client, message: Message):
     file_link = f"https://t.me/{bot.username}?start={message.id}"
-    
     file_name = "Media File"
     file_size_text = ""
     
@@ -188,4 +230,5 @@ async def auto_link_generator(bot: Client, message: Message):
         quote=True,
         reply_markup=reply_markup,
         disable_web_page_preview=True
-    )
+        )
+    

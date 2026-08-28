@@ -7,6 +7,17 @@ from config import CHANNEL_ID, FORCE_SUB_CHANNEL
 # Auto Delete Timer (120 seconds = 2 minutes)
 AUTO_DELETE_TIME = 120
 
+def get_readable_size(size_in_bytes):
+    if not size_in_bytes:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    i = 0
+    size = float(size_in_bytes)
+    while size >= 1024.0 and i < len(units) - 1:
+        size /= 1024.0
+        i += 1
+    return f"{size:.2f} {units[i]}"
+
 async def auto_delete_file(file_msg: Message, alert_msg: Message, delay: int = AUTO_DELETE_TIME):
     await asyncio.sleep(delay)
     try:
@@ -50,7 +61,8 @@ async def start_handler(bot: Client, message: Message):
         ]
         return await message.reply_text(
             "<b>നിങ്ങൾക്ക് ഫയൽ ലഭിക്കാൻ താഴെ കാണുന്ന ചാനലിൽ ജോയിൻ ചെയ്യുക. ശേഷം 'Try Again' ക്ലിക്ക് ചെയ്യുക!</b>",
-            reply_markup=InlineKeyboardMarkup(buttons)
+            reply_markup=InlineKeyboardMarkup(buttons),
+            disable_web_page_preview=True
         )
 
     # File Retrieval via Link (/start <message_id>)
@@ -91,7 +103,8 @@ async def search_handler(bot: Client, message: Message):
         ]
         return await message.reply_text(
             "<b>ഫയലുകൾ തിരയാൻ ആദ്യം ഞങ്ങളുടെ ചാനലിൽ ജോയിൻ ചെയ്യുക!</b>",
-            reply_markup=InlineKeyboardMarkup(buttons)
+            reply_markup=InlineKeyboardMarkup(buttons),
+            disable_web_page_preview=True
         )
 
     query = message.text
@@ -146,9 +159,33 @@ async def send_file_callback(bot: Client, query: CallbackQuery):
     except Exception:
         await query.answer("❌ ഫയൽ അയക്കാൻ കഴിഞ്ഞില്ല.", show_alert=True)
 
-# Auto Link Generator for Channel Files
+# Stylish Clean Auto Link Generator
 @Client.on_message(filters.chat(CHANNEL_ID) & (filters.document | filters.video | filters.audio | filters.photo))
 async def auto_link_generator(bot: Client, message: Message):
     file_link = f"https://t.me/{bot.username}?start={message.id}"
-    await message.reply_text(f"<b>🔗 ഡൗൺലോഡ് ലിങ്ക്:</b>\n\n{file_link}", quote=True)
     
+    file_name = "Media File"
+    file_size_text = ""
+    
+    media = message.document or message.video or message.audio
+    if media:
+        file_name = getattr(media, "file_name", None) or getattr(message, "caption", None) or "Media File"
+        file_size_text = f"📦 <b>Size:</b> <code>{get_readable_size(media.file_size)}</code>\n"
+    elif message.photo:
+        file_name = message.caption or "Photo"
+
+    text = (
+        f"🎬 <b>File:</b> <code>{file_name}</code>\n"
+        f"{file_size_text}"
+    )
+    
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Download File 📥", url=file_link)]
+    ])
+    
+    await message.reply_text(
+        text=text,
+        quote=True,
+        reply_markup=reply_markup,
+        disable_web_page_preview=True
+    )

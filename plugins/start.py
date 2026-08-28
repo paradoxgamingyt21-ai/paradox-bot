@@ -70,16 +70,33 @@ async def start_handler(bot: Client, message: Message):
     )
     await message.reply_text(text)
 
-# Auto Indexing from Database Channel
+# Help Command
+@Client.on_message(filters.command("help") & filters.private)
+async def help_handler(bot: Client, message: Message):
+    help_text = (
+        "ℹ️ **സഹായം:**\n\n"
+        "• സിനിമയുടെ പേര് കൃത്യമായി ടൈപ്പ് ചെയ്ത് അയക്കുക.\n"
+        "• ലഭിക്കുന്ന ബട്ടണിൽ ക്ലിക്ക് ചെയ്താൽ ഫയൽ ചാറ്റിൽ ലഭിക്കും.\n"
+        "• ലഭിക്കുന്ന ഫയലുകൾ 2 മിനിറ്റിനുള്ളിൽ ഡിലീറ്റ് ആകും."
+    )
+    await message.reply_text(help_text)
+
+# Auto Indexing from Database Channel (Handles Document, Video & Caption)
 @Client.on_message(filters.channel & (filters.document | filters.video))
 async def auto_link_generator(bot: Client, message: Message):
     media = message.document or message.video
     if not media:
         return
 
+    # Extract clean file name from media attributes or caption
+    file_name = getattr(media, "file_name", None)
+    if not file_name and message.caption:
+        file_name = message.caption.split("\n")[0]
+    if not file_name:
+        file_name = "Telegram File"
+
     file_id = media.file_id
-    file_name = media.file_name or "Unknown File"
-    file_size = media.file_size
+    file_size = getattr(media, "file_size", 0)
 
     files_col.update_one(
         {"file_id": file_id},
@@ -93,8 +110,8 @@ async def auto_link_generator(bot: Client, message: Message):
         upsert=True
     )
 
-# Search Handler
-@Client.on_message(filters.text & filters.private & ~filters.command(["start", "broadcast"]))
+# Search Handler (Ignores all / commands)
+@Client.on_message(filters.text & filters.private & ~filters.regex(r"^/"))
 async def search_handler(bot: Client, message: Message):
     if message.from_user:
         users_col.update_one(
@@ -104,7 +121,7 @@ async def search_handler(bot: Client, message: Message):
         )
 
     query = message.text.strip()
-    regex = re.compile(query, re.IGNORECASE)
+    regex = re.compile(re.escape(query), re.IGNORECASE)
     results = list(files_col.find({"file_name": regex}).limit(10))
 
     if not results:
@@ -114,7 +131,7 @@ async def search_handler(bot: Client, message: Message):
     buttons = []
     for file in results:
         file_size = get_readable_size(file.get("file_size", 0))
-        btn_text = f"[{file_size}] {file['file_name']}"
+        btn_text = f"[{file_size}] {file['file_name'][:40]}"
         callback_data = f"get_{file['file_id']}"
         buttons.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
 
@@ -189,5 +206,5 @@ async def broadcast_handler(bot: Client, message: Message):
         f"🎉 **വിജയകരം:** `{success}`\n"
         f"🚫 **ബ്ലോക്ക് ചെയ്തവർ:** `{blocked}`\n"
         f"❌ **പരാജയപ്പെട്ടത്:** `{failed}`"
-        )
+    )
     
